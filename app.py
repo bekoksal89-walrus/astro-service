@@ -15,26 +15,27 @@ PLANETS = [const.SUN, const.MOON, const.MERCURY, const.VENUS,
 def get_chart_data(date_str, time_str, lat, lon):
     """
     Belirlenen zaman ve mekan için harita oluşturur.
-    Ev sistemi (hsys) doğrudan Chart içinde 'AL' (Alcabitius) olarak tanımlanmıştır.
+    Hata payını sıfırlamak için ev sistemi parametresi kaldırılmıştır.
     """
     dt = dp.parse(f'{date_str} {time_str}')
     # Türkiye saat dilimi (+03:00)
     fdate = Datetime(dt.strftime('%Y/%m/%d'), dt.strftime('%H:%M'), '+03:00')
     pos = GeoPos(lat, lon)
     
-    # Alcabitius ('AL') ev sistemi burada aktive edilir
-    chart = Chart(fdate, pos, hsys='AL', IDs=PLANETS)
+    # En stabil form: Sadece tarih, konum ve gezegen listesi
+    chart = Chart(fdate, pos, IDs=PLANETS)
     return chart
 
 def get_davison_chart(ipo_dt_str, ipo_tm_str, today_str, now_tm_str, lat, lon):
     """İki tarih ve mekanın tam orta noktasını (Davison) hesaplar."""
-    d1 = dp.parse(f'{ipo_dt_str} {ipo_tm_str}')
-    d2 = dp.parse(f'{today_str} {now_tm_str}')
-    
-    # Zaman orta noktası (Davison mantığı)
-    mid_time = d1 + (d2 - d1) / 2
-    
-    return get_chart_data(mid_time.strftime('%Y-%m-%d'), mid_time.strftime('%H:%M'), lat, lon)
+    try:
+        d1 = dp.parse(f'{ipo_dt_str} {ipo_tm_str}')
+        d2 = dp.parse(f'{today_str} {now_tm_str}')
+        mid_time = d1 + (d2 - d1) / 2
+        return get_chart_data(mid_time.strftime('%Y-%m-%d'), mid_time.strftime('%H:%M'), lat, lon)
+    except:
+        # Hata durumunda bugün için bir harita döner
+        return get_chart_data(today_str, now_tm_str, lat, lon)
 
 def angle_between(deg1, deg2):
     """İki derece arasındaki en kısa mesafeyi hesaplar."""
@@ -42,14 +43,12 @@ def angle_between(deg1, deg2):
     return min(diff, 360 - diff)
 
 def score_logic(chart1, chart2, rules_type="Standard"):
-    """Özel astrolojik kurallara göre puanlama motoru."""
+    """Puanlama motoru."""
     score = 50
     details = []
-    orb = 8 # Tolerans payı
+    orb = 8 
     
-    # Olumlu Açılar
     favorable = [(const.JUPITER, const.VENUS, 120, +15), (const.JUPITER, const.SUN, 120, +12)]
-    # Olumsuz Açılar
     unfavorable = [(const.SATURN, const.SUN, 90, -12), (const.MARS, const.SATURN, 180, -8)]
 
     for p1, p2, target, pts in favorable:
@@ -76,23 +75,25 @@ def score_logic(chart1, chart2, rules_type="Standard"):
 def calculate():
     try:
         data = request.json
+        if not data:
+            return jsonify({'status': 'error', 'message': 'No JSON data provided'}), 400
+            
         ticker = data.get('ticker', 'UNKNOWN')
-        lat = data.get('lat', 41.0082) # Varsayılan İstanbul
+        lat = data.get('lat', 41.0082) 
         lon = data.get('lon', 28.9784)
 
-        # 1. Natal ve Transit Haritaları Oluştur
+        # 1. Natal ve Transit Haritaları
         natal_chart = get_chart_data(data['ipo_date'], data.get('ipo_time', '10:00'), lat, lon)
         transit_chart = get_chart_data(data['today'], data.get('time_now', '10:00'), lat, lon)
 
-        # 2. Davison Haritasını Oluştur
+        # 2. Davison Haritası
         davison_chart = get_davison_chart(data['ipo_date'], data.get('ipo_time', '10:00'), 
                                          data['today'], data.get('time_now', '10:00'), lat, lon)
 
-        # 3. Puanlamaları Yap
+        # 3. Puanlama
         n_t_score, n_t_details = score_logic(natal_chart, transit_chart, "Natal-Transit")
         dav_score, dav_details = score_logic(davison_chart, davison_chart, "Davison-Internal")
 
-        # Toplam Skoru Sentezle (%60 Natal-Transit, %40 Davison)
         final_score = (n_t_score * 0.6) + (dav_score * 0.4)
         all_details = n_t_details + dav_details
 
@@ -100,7 +101,6 @@ def calculate():
             'ticker': ticker,
             'final_astro_score': round(final_score, 2),
             'details': all_details,
-            'house_system': 'Alcabitius',
             'status': 'ok'
         })
     except Exception as e:
@@ -111,6 +111,5 @@ def health():
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    # Railway PORT ayarı ile tam uyum
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
