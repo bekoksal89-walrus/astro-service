@@ -80,22 +80,23 @@ def sign_from_lon(lon):
     }
 
 def planet_house(chart, planet_lon):
+    # Chart içindeki evleri bulmak için chart.houses kullanılır
     house_cusps = []
-    for i, h in enumerate(HOUSES):
-        try:
-            obj = chart.get(h)
-            house_cusps.append({'ev_no': i + 1, 'kusp_lon': obj.lon})
-        except:
-            continue
+    for i, h_obj in enumerate(chart.houses):
+        house_cusps.append({'ev_no': i + 1, 'kusp_lon': h_obj.lon})
+
     if not house_cusps:
         return {'ev': None, 'ev_kusp_burcu': None, 'ev_kusp_lon': None}
+
     for i in range(len(house_cusps)):
         cur = house_cusps[i]['kusp_lon']
         nxt = house_cusps[(i + 1) % len(house_cusps)]['kusp_lon']
+
         if cur <= nxt:
             inside = cur <= planet_lon < nxt
         else:
             inside = planet_lon >= cur or planet_lon < nxt
+
         if inside:
             ev_no    = house_cusps[i]['ev_no']
             kusp_lon = house_cusps[i]['kusp_lon']
@@ -133,7 +134,8 @@ def build_chart(date_str, time_str, lat, lon, tz='+03:00'):
     dt    = dp.parse(f'{date_str} {time_str}')
     fdate = Datetime(dt.strftime('%Y/%m/%d'), dt.strftime('%H:%M'), tz)
     pos   = GeoPos(float(lat), float(lon))
-    return Chart(fdate, pos, IDs=PLANETS + HOUSES)
+    # CRITICAL: Sadece PLANETS gönderilir, evler otomatik hesaplanır
+    return Chart(fdate, pos, IDs=PLANETS)
 
 def build_progress_chart(ipo_date_str, ipo_time_str, target_date_str, lat, lon, tz='+03:00'):
     ipo_dt        = dp.parse(f'{ipo_date_str} {ipo_time_str}')
@@ -142,7 +144,8 @@ def build_progress_chart(ipo_date_str, ipo_time_str, target_date_str, lat, lon, 
     prog_dt       = ipo_dt + timedelta(days=years_elapsed)
     fdate = Datetime(prog_dt.strftime('%Y/%m/%d'), prog_dt.strftime('%H:%M'), tz)
     pos   = GeoPos(float(lat), float(lon))
-    return Chart(fdate, pos, IDs=PLANETS + HOUSES)
+    # CRITICAL: Sadece PLANETS gönderilir
+    return Chart(fdate, pos, IDs=PLANETS)
 
 def angle_between(deg1, deg2):
     diff = abs(deg1 - deg2) % 360
@@ -290,6 +293,5 @@ def health():
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    # Railway Port Ayarı
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
