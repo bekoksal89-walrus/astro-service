@@ -5,21 +5,21 @@ from flatlib.chart import Chart
 from flatlib import const
 from dateutil import parser as dp
 from datetime import datetime, timedelta
+import math
 
 app = Flask(__name__)
 
-# Tüm gezegenler
+# ─── Sabitler ─────────────────────────────────────────────────────────────────
+
 PLANETS = [
     const.SUN, const.MOON, const.MERCURY, const.VENUS,
     const.MARS, const.JUPITER, const.SATURN,
     const.URANUS, const.NEPTUNE, const.PLUTO
 ]
 
-# Hızlı / yavaş gezegen ayrımı (transit sinastri orb kuralı için)
-SLOW_PLANETS  = [const.SATURN, const.URANUS, const.NEPTUNE, const.PLUTO, const.JUPITER]
-FAST_PLANETS  = [const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS]
+SLOW_PLANETS = [const.JUPITER, const.SATURN, const.URANUS, const.NEPTUNE, const.PLUTO]
+FAST_PLANETS = [const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS]
 
-# Desteklenen açılar ve isimleri
 ASPECTS = [
     (0,   'Kavuşum'),
     (60,  'Sektil'),
@@ -29,58 +29,175 @@ ASPECTS = [
     (180, 'Karşıt'),
 ]
 
-# Açı niteliği
 ASPECT_NATURE = {
-    0:   'nötr',
-    60:  'olumlu',
-    90:  'olumsuz',
-    120: 'olumlu',
-    150: 'olumsuz',
-    180: 'olumsuz',
+    0: 'nötr', 60: 'olumlu', 90: 'olumsuz',
+    120: 'olumlu', 150: 'olumsuz', 180: 'olumsuz',
 }
 
+SIGN_TR = {
+    'Ari': 'Koç',    'Tau': 'Boğa',   'Gem': 'İkizler',
+    'Can': 'Yengeç', 'Leo': 'Aslan',  'Vir': 'Başak',
+    'Lib': 'Terazi', 'Sco': 'Akrep',  'Sag': 'Yay',
+    'Cap': 'Oğlak',  'Aqu': 'Kova',   'Pis': 'Balık',
+}
 
-# ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
+PLANET_TR = {
+    const.SUN: 'Güneş', const.MOON: 'Ay', const.MERCURY: 'Merkür',
+    const.VENUS: 'Venüs', const.MARS: 'Mars', const.JUPITER: 'Jüpiter',
+    const.SATURN: 'Satürn', const.URANUS: 'Uranüs',
+    const.NEPTUNE: 'Neptün', const.PLUTO: 'Plüton',
+}
+
+HOUSES = [
+    const.HOUSE1,  const.HOUSE2,  const.HOUSE3,  const.HOUSE4,
+    const.HOUSE5,  const.HOUSE6,  const.HOUSE7,  const.HOUSE8,
+    const.HOUSE9,  const.HOUSE10, const.HOUSE11, const.HOUSE12,
+]
+
+
+# ─── Format Yardımcıları ──────────────────────────────────────────────────────
+
+def deg_to_dm(decimal_deg):
+    """284.7250 → '284°43' 30\"' """
+    decimal_deg = abs(decimal_deg)
+    d = int(decimal_deg)
+    remainder = (decimal_deg - d) * 60
+    m = int(remainder)
+    s = int((remainder - m) * 60)
+    return f"{d}°{m:02d}'{s:02d}\""
+
+
+def orb_to_dm(orb_decimal):
+    """0.7250 → '0°43' 30\"' """
+    return deg_to_dm(orb_decimal)
+
+
+def sign_from_lon(lon):
+    """
+    Ekliptik boylam → Türkçe burç adı + burç içi derece°dakika saniye
+    Örn: 245.73 → {'burc': 'Yay', 'burc_lon': '5°43'48\"'}
+    """
+    signs_en = ['Ari','Tau','Gem','Can','Leo','Vir',
+                'Lib','Sco','Sag','Cap','Aqu','Pis']
+    idx   = int(lon // 30) % 12
+    inner = lon % 30
+    return {
+        'burc':     SIGN_TR.get(signs_en[idx], signs_en[idx]),
+        'burc_lon': deg_to_dm(inner),
+    }
+
+
+# ─── Ev Tespiti ───────────────────────────────────────────────────────────────
+
+def planet_house(chart, planet_lon):
+    """
+    Gezegenin hangi evde olduğunu, o evin kusp burcunu ve
+    kusp boylamını derece°dakika saniye formatında döner.
+    """
+    house_cusps = []
+    for i, h in enumerate(HOUSES):
+        try:
+            obj = chart.get(h)
+            house_cusps.append({'ev_no': i + 1, 'kusp_lon': obj.lon})
+        except Exception:
+            continue
+
+    if not house_cusps:
+        return {'ev': None, 'ev_kusp_burcu': None, 'ev_kusp_lon': None}
+
+    for i in range(len(house_cusps)):
+        cur = house_cusps[i]['kusp_lon']
+        nxt = house_cusps[(i + 1) % len(house_cusps)]['kusp_lon']
+
+        if cur <= nxt:
+            inside = cur <= planet_lon < nxt
+        else:
+            # Koç/Balık sınırını geçen ev
+            inside = planet_lon >= cur or planet_lon < nxt
+
+        if inside:
+            ev_no    = house_cusps[i]['ev_no']
+            kusp_lon = house_cusps[i]['kusp_lon']
+            sign_inf = sign_from_lon(kusp_lon)
+            return {
+                'ev':          ev_no,
+                'ev_kusp_burcu': sign_inf['burc'],
+                'ev_kusp_lon': deg_to_dm(kusp_lon),
+            }
+
+    return {'ev': None, 'ev_kusp_burcu': None, 'ev_kusp_lon': None}
+
+
+# ─── Harita Gezegen Detay Çıkarıcı ───────────────────────────────────────────
+
+def extract_planet_details(chart, harita_adi):
+    """
+    Haritadaki her gezegen için:
+      - Türkçe gezegen adı
+      - Ham boylam (decimal)
+      - Boylam derece°dakika saniye formatı
+      - Burç adı (TR)
+      - Burç içi derece°dakika saniye
+      - Ev numarası
+      - Evi kesen burcun adı
+      - Evi kesen kusp boylamı (derece°dakika saniye)
+    """
+    gezegenler = []
+    for p in PLANETS:
+        try:
+            obj      = chart.get(p)
+            lon      = obj.lon
+            sign_inf = sign_from_lon(lon)
+            house_inf = planet_house(chart, lon)
+
+            gezegenler.append({
+                'gezegen':       PLANET_TR.get(p, p),
+                'lon_ham':       round(lon, 4),
+                'lon_fmt':       deg_to_dm(lon),
+                'burc':          sign_inf['burc'],
+                'burc_lon':      sign_inf['burc_lon'],
+                'ev':            house_inf['ev'],
+                'ev_kusp_burcu': house_inf['ev_kusp_burcu'],
+                'ev_kusp_lon':   house_inf['ev_kusp_lon'],
+            })
+        except Exception:
+            continue
+
+    return {
+        'harita':     harita_adi,
+        'gezegenler': gezegenler,
+    }
+
+
+# ─── Chart Oluşturucular ──────────────────────────────────────────────────────
 
 def build_chart(date_str, time_str, lat, lon, tz='+03:00'):
-    """Verilen tarih/saat/konum için natal chart döner."""
-    dt = dp.parse(f'{date_str} {time_str}')
+    dt    = dp.parse(f'{date_str} {time_str}')
     fdate = Datetime(dt.strftime('%Y/%m/%d'), dt.strftime('%H:%M'), tz)
-    pos = GeoPos(float(lat), float(lon))
-    return Chart(fdate, pos, IDs=PLANETS)
-
-
-def build_progress_chart(ipo_date_str, ipo_time_str, target_date_str, lat, lon, tz='+03:00'):
-    """
-    Secondary Progressions (ikincil ilerleme):
-    Her bir gün = bir yıl kuralıyla hesaplanır.
-    ipo_date'den target_date'e kadar geçen yıl sayısı kadar gün ileri gidilir.
-    """
-    ipo_dt    = dp.parse(f'{ipo_date_str} {ipo_time_str}')
-    target_dt = dp.parse(f'{target_date_str} 10:00')
-
-    years_elapsed = (target_dt - ipo_dt).days / 365.25
-    progressed_dt = ipo_dt + timedelta(days=years_elapsed)
-
-    prog_date = progressed_dt.strftime('%Y/%m/%d')
-    prog_time = progressed_dt.strftime('%H:%M')
-
-    fdate = Datetime(prog_date, prog_time, tz)
     pos   = GeoPos(float(lat), float(lon))
-    return Chart(fdate, pos, IDs=PLANETS)
+    return Chart(fdate, pos, IDs=PLANETS + HOUSES)
 
+
+def build_progress_chart(ipo_date_str, ipo_time_str, target_date_str,
+                          lat, lon, tz='+03:00'):
+    """Secondary Progressions — her gün = bir yıl kuralı."""
+    ipo_dt        = dp.parse(f'{ipo_date_str} {ipo_time_str}')
+    target_dt     = dp.parse(f'{target_date_str} 10:00')
+    years_elapsed = (target_dt - ipo_dt).days / 365.25
+    prog_dt       = ipo_dt + timedelta(days=years_elapsed)
+    fdate = Datetime(prog_dt.strftime('%Y/%m/%d'), prog_dt.strftime('%H:%M'), tz)
+    pos   = GeoPos(float(lat), float(lon))
+    return Chart(fdate, pos, IDs=PLANETS + HOUSES)
+
+
+# ─── Açı Hesaplayıcılar ───────────────────────────────────────────────────────
 
 def angle_between(deg1, deg2):
-    """İki derece arasındaki en kısa açıyı döner (0-180)."""
     diff = abs(deg1 - deg2) % 360
     return min(diff, 360 - diff)
 
 
 def find_aspects(chart_a, chart_b, orb, label_a='A', label_b='B'):
-    """
-    İki harita arasındaki tüm açıları bulur.
-    Her gezegen çifti için orb dahilindeki en yakın açıyı raporlar.
-    """
     found = []
     for p1 in PLANETS:
         for p2 in PLANETS:
@@ -91,30 +208,30 @@ def find_aspects(chart_a, chart_b, orb, label_a='A', label_b='B'):
 
                 for target_deg, aspect_name in ASPECTS:
                     if abs(ang - target_deg) <= orb:
-                        exact_diff = round(abs(ang - target_deg), 2)
+                        orb_val = abs(ang - target_deg)
                         found.append({
-                            'acidan':   f'{label_a}:{p1}',
-                            'aciya':    f'{label_b}:{p2}',
-                            'aci_tipi': aspect_name,
-                            'derece':   target_deg,
-                            'orb':      exact_diff,
-                            'nitelik':  ASPECT_NATURE[target_deg],
-                            'lon_a':    round(lon1, 2),
-                            'lon_b':    round(lon2, 2),
+                            'acidan':      f'{label_a}:{PLANET_TR.get(p1, p1)}',
+                            'aciya':       f'{label_b}:{PLANET_TR.get(p2, p2)}',
+                            'aci_tipi':    aspect_name,
+                            'derece':      target_deg,
+                            'orb_decimal': round(orb_val, 4),
+                            'orb_fmt':     orb_to_dm(orb_val),
+                            'nitelik':     ASPECT_NATURE[target_deg],
+                            'lon_a_ham':   round(lon1, 4),
+                            'lon_b_ham':   round(lon2, 4),
+                            'lon_a_fmt':   deg_to_dm(lon1),
+                            'lon_b_fmt':   deg_to_dm(lon2),
                         })
-                        break  # aynı gezegen çifti için en yakın açıyı al
+                        break
             except Exception:
                 continue
-    # Orb'a göre sırala (en exact önce)
-    found.sort(key=lambda x: x['orb'])
+    found.sort(key=lambda x: x['orb_decimal'])
     return found
 
 
-def find_transit_progress_aspects(transit_chart, progress_chart, orb_sun_moon=15, orb_other=8):
-    """
-    Transit sinastri: Yavaş transit gezegen → Hızlı progress gezegeni
-    Güneş ve Ay için 15 derece, diğerleri için 8 derece orb.
-    """
+def find_transit_progress_aspects(transit_chart, progress_chart,
+                                   orb_sun_moon=15, orb_other=8):
+    """Yavaş transit gezegen → Hızlı progress gezegeni sinastri."""
     found = []
     for slow_p in SLOW_PLANETS:
         for fast_p in FAST_PLANETS:
@@ -122,156 +239,172 @@ def find_transit_progress_aspects(transit_chart, progress_chart, orb_sun_moon=15
                 lon_slow = transit_chart.get(slow_p).lon
                 lon_fast = progress_chart.get(fast_p).lon
                 ang      = angle_between(lon_slow, lon_fast)
-
-                # Güneş ve Ay için farklı orb
-                orb = orb_sun_moon if fast_p in [const.SUN, const.MOON] else orb_other
+                orb      = orb_sun_moon if fast_p in [const.SUN, const.MOON] else orb_other
 
                 for target_deg, aspect_name in ASPECTS:
                     if abs(ang - target_deg) <= orb:
-                        exact_diff = round(abs(ang - target_deg), 2)
+                        orb_val = abs(ang - target_deg)
                         found.append({
-                            'acidan':        f'Transit:{slow_p}',
-                            'aciya':         f'Progress:{fast_p}',
-                            'aci_tipi':      aspect_name,
-                            'derece':        target_deg,
-                            'orb':           exact_diff,
-                            'nitelik':       ASPECT_NATURE[target_deg],
-                            'uygulanan_orb': orb,
+                            'acidan':           f'Transit:{PLANET_TR.get(slow_p, slow_p)}',
+                            'aciya':            f'Progress:{PLANET_TR.get(fast_p, fast_p)}',
+                            'aci_tipi':         aspect_name,
+                            'derece':           target_deg,
+                            'orb_decimal':      round(orb_val, 4),
+                            'orb_fmt':          orb_to_dm(orb_val),
+                            'nitelik':          ASPECT_NATURE[target_deg],
+                            'uygulanan_orb':    orb,
+                            'lon_transit_ham':  round(lon_slow, 4),
+                            'lon_progress_ham': round(lon_fast, 4),
+                            'lon_transit_fmt':  deg_to_dm(lon_slow),
+                            'lon_progress_fmt': deg_to_dm(lon_fast),
                         })
                         break
             except Exception:
                 continue
-    found.sort(key=lambda x: x['orb'])
+    found.sort(key=lambda x: x['orb_decimal'])
     return found
 
 
+# ─── Skor ─────────────────────────────────────────────────────────────────────
+
 def score_from_aspects(aspects):
-    """
-    Açı listesinden 0-100 arası skor üretir.
-    Olumlu açılar puan ekler, olumsuzlar düşürür.
-    Orb'a yakınlık ağırlık katsayısı olarak kullanılır.
-    """
     score = 50
     for a in aspects:
-        # Orb ne kadar küçükse etki o kadar güçlü
-        max_orb   = a.get('uygulanan_orb', 8)
-        weight    = 1 - (a['orb'] / (max_orb + 1))
-
+        max_orb = a.get('uygulanan_orb', 8)
+        weight  = 1 - (a['orb_decimal'] / (max_orb + 1))
         if a['nitelik'] == 'olumlu':
             score += 8 * weight
         elif a['nitelik'] == 'olumsuz':
             score -= 6 * weight
-        # nötr (kavuşum): bağlama göre — burada nötr bırakıyoruz
-
     return max(0, min(100, round(score, 1)))
 
 
-def prepare_ai_summary(ticker, natal_prog, prog_natal, transit_prog, all_aspects_flat):
-    """
-    Abacus AI / Claude için yapılandırılmış metin özeti hazırlar.
-    """
-    lines = [
-        f"=== {ticker} — Astrolojik Analiz Özeti ===",
+# ─── AI Özeti ─────────────────────────────────────────────────────────────────
+
+def prepare_ai_summary(ticker,
+                        natal_d, prog_d, transit_d,
+                        natal_prog, prog_natal, transit_prog,
+                        all_aspects):
+
+    def planet_block(details):
+        lines = []
+        lines.append(
+            f"  {'Gezegen':<10} {'Burç':<10} {'Burç Lon':<14} "
+            f"{'Ev':>3}  {'Kusp Burç':<12} Kusp Lon"
+        )
+        lines.append("  " + "-" * 72)
+        for p in details['gezegenler']:
+            ev = str(p['ev']) if p['ev'] else '?'
+            lines.append(
+                f"  {p['gezegen']:<10} {p['burc']:<10} {p['burc_lon']:<14} "
+                f"{ev:>3}  {(p['ev_kusp_burcu'] or '?'):<12} {p['ev_kusp_lon'] or '?'}"
+            )
+        return lines
+
+    def aspect_block(aspect_list, limit=10):
+        lines = []
+        if not aspect_list:
+            lines.append("  Aktif açı bulunamadı.")
+            return lines
+        for a in aspect_list[:limit]:
+            lines.append(
+                f"  {a['acidan']:<24} {a['aci_tipi']:<12} {a['aciya']:<24} "
+                f"orb: {a['orb_fmt']:<12} [{a['nitelik']}]"
+            )
+        return lines
+
+    olumlu  = sum(1 for a in all_aspects if a['nitelik'] == 'olumlu')
+    olumsuz = sum(1 for a in all_aspects if a['nitelik'] == 'olumsuz')
+
+    sections = [
+        f"{'=' * 60}",
+        f"  {ticker} — Astrolojik Analiz Özeti",
+        f"{'=' * 60}",
         "",
-        "[ NATAL → PROGRESS AÇILARI ] (1° orb)",
-    ]
-    if natal_prog:
-        for a in natal_prog[:5]:  # en exact 5 açı
-            lines.append(
-                f"  {a['acidan']} {a['aci_tipi']} {a['aciya']} "
-                f"(orb: {a['orb']}°, {a['nitelik']})"
-            )
-    else:
-        lines.append("  Aktif açı bulunamadı.")
-
-    lines += ["", "[ PROGRESS → NATAL SİNASTRİ ] (1° orb)"]
-    if prog_natal:
-        for a in prog_natal[:5]:
-            lines.append(
-                f"  {a['acidan']} {a['aci_tipi']} {a['aciya']} "
-                f"(orb: {a['orb']}°, {a['nitelik']})"
-            )
-    else:
-        lines.append("  Aktif açı bulunamadı.")
-
-    lines += ["", "[ TRANSİT (yavaş) → PROGRESS (hızlı) SİNASTRİ ]"]
-    if transit_prog:
-        for a in transit_prog[:8]:
-            lines.append(
-                f"  {a['acidan']} {a['aci_tipi']} {a['aciya']} "
-                f"(orb: {a['orb']}°, uygulanan orb: {a['uygulanan_orb']}°, {a['nitelik']})"
-            )
-    else:
-        lines.append("  Aktif açı bulunamadı.")
-
-    # Genel değerlendirme
-    olumlu   = sum(1 for a in all_aspects_flat if a['nitelik'] == 'olumlu')
-    olumsuz  = sum(1 for a in all_aspects_flat if a['nitelik'] == 'olumsuz')
-    lines += [
+        "── NATAL HARİTA ─────────────────────────────────────────",
+    ] + planet_block(natal_d) + [
         "",
-        f"[ GENEL ] Olumlu açı: {olumlu} | Olumsuz açı: {olumsuz}",
+        "── PROGRESS HARİTA ──────────────────────────────────────",
+    ] + planet_block(prog_d) + [
+        "",
+        "── TRANSİT HARİTA ───────────────────────────────────────",
+    ] + planet_block(transit_d) + [
+        "",
+        "── NATAL → PROGRESS AÇILARI  (1° orb) ──────────────────",
+    ] + aspect_block(natal_prog) + [
+        "",
+        "── PROGRESS → NATAL SİNASTRİ  (1° orb) ─────────────────",
+    ] + aspect_block(prog_natal) + [
+        "",
+        "── TRANSİT (yavaş) → PROGRESS (hızlı) SİNASTRİ ────────",
+    ] + aspect_block(transit_prog) + [
+        "",
+        f"── ÖZET ─────────────────────────────────────────────────",
+        f"  Toplam aktif açı : {len(all_aspects)}",
+        f"  Olumlu           : {olumlu}",
+        f"  Olumsuz          : {olumsuz}",
+        f"  Astro Skoru      : (response['astro_score'] alanına bak)",
     ]
 
-    return "\n".join(lines)
+    return "\n".join(sections)
 
 
 # ─── Ana Endpoint ─────────────────────────────────────────────────────────────
 
 @app.route('/astro', methods=['POST'])
 def calculate():
-    data = request.json
+    data     = request.json
+    ticker   = data.get('ticker', 'UNKNOWN')
+    ipo_date = data['ipo_date']
+    ipo_time = data.get('ipo_time', '10:00')
+    today    = data['today']
+    time_now = data.get('time_now', '10:00')
+    lat      = data.get('lat', 41.0082)
+    lon      = data.get('lon', 28.9784)
 
-    # Zorunlu alanlar
-    ticker    = data.get('ticker', 'UNKNOWN')
-    ipo_date  = data['ipo_date']
-    ipo_time  = data.get('ipo_time', '10:00')
-    today     = data['today']
-    time_now  = data.get('time_now', '10:00')
-    lat       = data.get('lat', 41.0082)
-    lon       = data.get('lon', 28.9784)
-
-    # 1. Natal harita (IPO anı)
-    natal = build_chart(ipo_date, ipo_time, lat, lon)
-
-    # 2. Progress harita (bugüne göre ilerlemiş natal)
+    # Haritaları oluştur
+    natal    = build_chart(ipo_date, ipo_time, lat, lon)
     progress = build_progress_chart(ipo_date, ipo_time, today, lat, lon)
+    transit  = build_chart(today, time_now, lat, lon)
 
-    # 3. Transit harita (bugünkü gökyüzü)
-    transit = build_chart(today, time_now, lat, lon)
+    # Her harita için gezegen detayları
+    natal_details   = extract_planet_details(natal,    'Natal')
+    prog_details    = extract_planet_details(progress, 'Progress')
+    transit_details = extract_planet_details(transit,  'Transit')
 
-    # 4. Natal → Progress açıları (1° orb)
-    natal_to_prog = find_aspects(natal, progress, orb=1,
-                                 label_a='Natal', label_b='Progress')
+    # Açılar
+    natal_to_prog   = find_aspects(natal, progress, orb=1,
+                                   label_a='Natal', label_b='Progress')
+    prog_to_natal   = find_aspects(progress, natal, orb=1,
+                                   label_a='Progress', label_b='Natal')
+    transit_to_prog = find_transit_progress_aspects(
+                          transit, progress, orb_sun_moon=15, orb_other=8)
 
-    # 5. Progress → Natal sinastri (1° orb)
-    prog_to_natal = find_aspects(progress, natal, orb=1,
-                                 label_a='Progress', label_b='Natal')
-
-    # 6. Transit (yavaş) → Progress (hızlı) sinastri
-    transit_to_prog = find_transit_progress_aspects(transit, progress,
-                                                    orb_sun_moon=15, orb_other=8)
-
-    # Tüm açıları birleştir (skor için)
     all_aspects = natal_to_prog + prog_to_natal + transit_to_prog
-
-    # Genel astro skoru
     astro_score = score_from_aspects(all_aspects)
 
-    # AI için özet metin
     ai_summary = prepare_ai_summary(
-        ticker, natal_to_prog, prog_to_natal, transit_to_prog, all_aspects
+        ticker,
+        natal_details, prog_details, transit_details,
+        natal_to_prog, prog_to_natal, transit_to_prog,
+        all_aspects,
     )
 
     return jsonify({
-        'ticker':       ticker,
-        'astro_score':  astro_score,
-        'status':       'ok',
-        'ai_summary':   ai_summary,
-        'detaylar': {
-            'natal_progress':    natal_to_prog,
-            'progress_natal':    prog_to_natal,
-            'transit_progress':  transit_to_prog,
-        }
+        'ticker':      ticker,
+        'astro_score': astro_score,
+        'status':      'ok',
+        'ai_summary':  ai_summary,
+        'haritalar': {
+            'natal':    natal_details,
+            'progress': prog_details,
+            'transit':  transit_details,
+        },
+        'acılar': {
+            'natal_progress':   natal_to_prog,
+            'progress_natal':   prog_to_natal,
+            'transit_progress': transit_to_prog,
+        },
     })
 
 
