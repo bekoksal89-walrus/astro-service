@@ -356,6 +356,7 @@ def prepare_ai_summary(ticker,
 
 @app.route('/astro', methods=['POST'])
 def calculate():
+    try:
     data     = request.json
         ticker   = data.get('ticker', 'UNKNOWN')
         ipo_date = data['ipo_date']
