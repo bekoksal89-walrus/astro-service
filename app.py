@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify
+Şu servisten 500 hatası alıyorum
+
+Servis "from flask import Flask, request, jsonify
 from flatlib.datetime import Datetime
 from flatlib.geopos import GeoPos
 from flatlib.chart import Chart
@@ -6,6 +8,7 @@ from flatlib import const
 from dateutil import parser as dp
 from datetime import datetime, timedelta
 import math
+import traceback
 
 app = Flask(__name__)
 
@@ -354,58 +357,64 @@ def prepare_ai_summary(ticker,
 @app.route('/astro', methods=['POST'])
 def calculate():
     data     = request.json
-    ticker   = data.get('ticker', 'UNKNOWN')
-    ipo_date = data['ipo_date']
-    ipo_time = data.get('ipo_time', '10:00')
-    today    = data['today']
-    time_now = data.get('time_now', '10:00')
-    lat      = data.get('lat', 41.0082)
-    lon      = data.get('lon', 28.9784)
+        ticker   = data.get('ticker', 'UNKNOWN')
+        ipo_date = data['ipo_date']
+        ipo_time = data.get('ipo_time', '10:00')
+        today    = data['today']
+        time_now = data.get('time_now', '10:00')
+        lat      = data.get('lat', 41.0082)
+        lon      = data.get('lon', 28.9784)
 
-    # Haritaları oluştur
-    natal    = build_chart(ipo_date, ipo_time, lat, lon)
-    progress = build_progress_chart(ipo_date, ipo_time, today, lat, lon)
-    transit  = build_chart(today, time_now, lat, lon)
+        # Haritaları oluştur
+        natal    = build_chart(ipo_date, ipo_time, lat, lon)
+        progress = build_progress_chart(ipo_date, ipo_time, today, lat, lon)
+        transit  = build_chart(today, time_now, lat, lon)
 
-    # Her harita için gezegen detayları
-    natal_details   = extract_planet_details(natal,    'Natal')
-    prog_details    = extract_planet_details(progress, 'Progress')
-    transit_details = extract_planet_details(transit,  'Transit')
+        # Her harita için gezegen detayları
+        natal_details   = extract_planet_details(natal,    'Natal')
+        prog_details    = extract_planet_details(progress, 'Progress')
+        transit_details = extract_planet_details(transit,  'Transit')
 
-    # Açılar
-    natal_to_prog   = find_aspects(natal, progress, orb=1,
-                                   label_a='Natal', label_b='Progress')
-    prog_to_natal   = find_aspects(progress, natal, orb=1,
-                                   label_a='Progress', label_b='Natal')
-    transit_to_prog = find_transit_progress_aspects(
-                          transit, progress, orb_sun_moon=15, orb_other=8)
+        # Açılar
+        natal_to_prog   = find_aspects(natal, progress, orb=1,
+                                       label_a='Natal', label_b='Progress')
+        prog_to_natal   = find_aspects(progress, natal, orb=1,
+                                       label_a='Progress', label_b='Natal')
+        transit_to_prog = find_transit_progress_aspects(
+                              transit, progress, orb_sun_moon=15, orb_other=8)
 
-    all_aspects = natal_to_prog + prog_to_natal + transit_to_prog
-    astro_score = score_from_aspects(all_aspects)
+        all_aspects = natal_to_prog + prog_to_natal + transit_to_prog
+        astro_score = score_from_aspects(all_aspects)
 
-    ai_summary = prepare_ai_summary(
-        ticker,
-        natal_details, prog_details, transit_details,
-        natal_to_prog, prog_to_natal, transit_to_prog,
-        all_aspects,
-    )
+        ai_summary = prepare_ai_summary(
+            ticker,
+            natal_details, prog_details, transit_details,
+            natal_to_prog, prog_to_natal, transit_to_prog,
+            all_aspects,
+        )
 
-    return jsonify({
-        'ticker':      ticker,
-        'astro_score': astro_score,
-        'status':      'ok',
-        'ai_summary':  ai_summary,
-        'haritalar': {
-            'natal':    natal_details,
-            'progress': prog_details,
-            'transit':  transit_details,
-        },
-        'acılar': {
-            'natal_progress':   natal_to_prog,
-            'progress_natal':   prog_to_natal,
-            'transit_progress': transit_to_prog,
-        },
-    })
+        return jsonify({
+            'ticker':      ticker,
+            'astro_score': astro_score,
+            'status':      'ok',
+            'ai_summary':  ai_summary,
+            'haritalar': {
+                'natal':    natal_details,
+                'progress': prog_details,
+                'transit':  transit_details,
+            },
+            'acılar': {
+                'natal_progress':   natal_to_prog,
+                'progress_natal':   prog_to_natal,
+                'transit_progress': transit_to_prog,
+            },
+        })
+
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'trace': traceback.format_exc()
+        }), 500
 
 
 @app.route('/health')
@@ -414,4 +423,33 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    app.run(host='0.0.0.0', port=8080)"
+
+Hata; "{
+  "errorMessage": "The service was not able to process your request",
+  "errorDescription": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>\n",
+  "errorDetails": {
+    "rawErrorMessage": [
+      "500 - \"<!doctype html>\\n<html lang=en>\\n<title>500 Internal Server Error</title>\\n<h1>Internal Server Error</h1>\\n<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>\\n\""
+    ],
+    "httpCode": "500"
+  },
+  "n8nDetails": {
+    "nodeName": "Astro api",
+    "nodeType": "n8n-nodes-base.httpRequest",
+    "nodeVersion": 4.4,
+    "itemIndex": 0,
+    "time": "29.03.2026 19:44:23",
+    "n8nVersion": "2.8.3 (Self Hosted)",
+    "binaryDataMode": "filesystem",
+    "stackTrace": [
+      "NodeApiError: The service was not able to process your request",
+      "    at ExecuteContext.execute (/usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-nodes-base@file+packages+nodes-base_@aws-sdk+credential-providers@3.808.0_asn1.js@5_8da18263ca0574b0db58d4fefd8173ce/node_modules/n8n-nodes-base/nodes/HttpRequest/V3/HttpRequestV3.node.ts:864:16)",
+      "    at processTicksAndRejections (node:internal/process/task_queues:105:5)",
+      "    at WorkflowExecute.executeNode (/usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-core@file+packages+core_@opentelemetry+api@1.9.0_@opentelemetry+exporter-trace-otlp_4dbefa9881a7c57a9e05a20ce4387c10/node_modules/n8n-core/src/execution-engine/workflow-execute.ts:1039:8)",
+      "    at WorkflowExecute.runNode (/usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-core@file+packages+core_@opentelemetry+api@1.9.0_@opentelemetry+exporter-trace-otlp_4dbefa9881a7c57a9e05a20ce4387c10/node_modules/n8n-core/src/execution-engine/workflow-execute.ts:1218:11)",
+      "    at /usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-core@file+packages+core_@opentelemetry+api@1.9.0_@opentelemetry+exporter-trace-otlp_4dbefa9881a7c57a9e05a20ce4387c10/node_modules/n8n-core/src/execution-engine/workflow-execute.ts:1655:27",
+      "    at /usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-core@file+packages+core_@opentelemetry+api@1.9.0_@opentelemetry+exporter-trace-otlp_4dbefa9881a7c57a9e05a20ce4387c10/node_modules/n8n-core/src/execution-engine/workflow-execute.ts:2298:11"
+    ]
+  }
+}"
