@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify"
+from flask import Flask, request, jsonify
 from flatlib.datetime import Datetime
 from flatlib.geopos import GeoPos
 from flatlib.chart import Chart
