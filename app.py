@@ -108,15 +108,46 @@ def planet_house(chart, planet_lon):
             }
     return {'ev': None, 'ev_kusp_burcu': None, 'ev_kusp_lon': None}
 
+def get_asc(chart):
+    """Chart'tan ASC (Yükselen) bilgisini çeker."""
+    try:
+        asc = chart.get(const.ASC)
+        lon = asc.lon
+        sign_inf = sign_from_lon(lon)
+        return {
+            'lon_ham':  round(lon, 4),
+            'lon_fmt':  deg_to_dm(lon),
+            'burc':     sign_inf['burc'],
+            'burc_lon': sign_inf['burc_lon'],
+        }
+    except:
+        return None
+
+def get_planet_movement(obj):
+    """Gezegenin hareketi: R (Retrograde), S (Stationary) veya D (Direct)."""
+    try:
+        movement = getattr(obj, 'movement', None) or getattr(obj, 'motion', None)
+        if movement is None:
+            return None
+        movement = str(movement).strip().upper()
+        if movement in ('R', 'RETROGRADE'):
+            return 'R'
+        elif movement in ('S', 'STATIONARY'):
+            return 'S'
+        return None  # Direct ise None döndür (gereksiz veri olmasın)
+    except:
+        return None
+
 def extract_planet_details(chart, harita_adi):
     gezegenler = []
     for p in PLANETS:
         try:
-            obj      = chart.get(p)
-            lon      = obj.lon
-            sign_inf = sign_from_lon(lon)
+            obj       = chart.get(p)
+            lon       = obj.lon
+            sign_inf  = sign_from_lon(lon)
             house_inf = planet_house(chart, lon)
-            gezegenler.append({
+            movement  = get_planet_movement(obj)
+            entry = {
                 'gezegen':       PLANET_TR.get(p, p),
                 'lon_ham':       round(lon, 4),
                 'lon_fmt':       deg_to_dm(lon),
@@ -125,16 +156,72 @@ def extract_planet_details(chart, harita_adi):
                 'ev':            house_inf['ev'],
                 'ev_kusp_burcu': house_inf['ev_kusp_burcu'],
                 'ev_kusp_lon':   house_inf['ev_kusp_lon'],
-            })
+            }
+            if movement:
+                entry['hareket'] = movement  # Sadece R veya S ise ekle
+            gezegenler.append(entry)
         except:
             continue
-    return {'harita': harita_adi, 'gezegenler': gezegenler}
+
+    # ASC bilgisini ekle
+    asc_info = get_asc(chart)
+    return {'harita': harita_adi, 'asc': asc_info, 'gezegenler': gezegenler}
 
 def build_chart(date_str, time_str, lat, lon, tz='+03:00'):
     dt    = dp.parse(f'{date_str} {time_str}')
     fdate = Datetime(dt.strftime('%Y/%m/%d'), dt.strftime('%H:%M'), tz)
     pos   = GeoPos(float(lat), float(lon))
     # CRITICAL: Sadece PLANETS gönderilir, evler otomatik hesaplanır
+    return Chart(fdate, pos, IDs=PLANETS)
+
+def build_solar_return_chart(ipo_date_str, ipo_time_str, target_year, lat, lon, tz='+03:00'):
+    """
+    Solar Return haritası: Güneş'in natal pozisyonuna döndüğü an.
+    target_year: Hangi yılın solar return'ü hesaplanacak (örn: 2024)
+    Yöntem: Natal Güneş lon'una en yakın tarihi o yıl içinde binary search ile bulur.
+    """
+    natal_chart = build_chart(ipo_date_str, ipo_time_str, lat, lon, tz)
+    natal_sun_lon = natal_chart.get(const.SUN).lon
+
+    # O yılın başından itibaren günlük adımlarla Güneş'in natal lon'a yaklaştığı günü bul
+    search_start = dp.parse(f'{target_year}-01-01 12:00')
+    best_dt   = None
+    best_diff = 999
+
+    for day_offset in range(366):
+        candidate = search_start + timedelta(days=day_offset)
+        fdate = Datetime(candidate.strftime('%Y/%m/%d'), candidate.strftime('%H:%M'), tz)
+        pos   = GeoPos(float(lat), float(lon))
+        try:
+            c = Chart(fdate, pos, IDs=PLANETS)
+            sun_lon = c.get(const.SUN).lon
+            diff = angle_between(sun_lon, natal_sun_lon)
+            if diff < best_diff:
+                best_diff = diff
+                best_dt   = candidate
+        except:
+            continue
+
+    if best_dt is None:
+        return None
+
+    # Bulunan günde saatlik hassasiyetle daralt
+    for hour_offset in range(-12, 13):
+        candidate = best_dt + timedelta(hours=hour_offset)
+        fdate = Datetime(candidate.strftime('%Y/%m/%d'), candidate.strftime('%H:%M'), tz)
+        pos   = GeoPos(float(lat), float(lon))
+        try:
+            c = Chart(fdate, pos, IDs=PLANETS)
+            sun_lon = c.get(const.SUN).lon
+            diff = angle_between(sun_lon, natal_sun_lon)
+            if diff < best_diff:
+                best_diff = diff
+                best_dt   = candidate
+        except:
+            continue
+
+    fdate = Datetime(best_dt.strftime('%Y/%m/%d'), best_dt.strftime('%H:%M'), tz)
+    pos   = GeoPos(float(lat), float(lon))
     return Chart(fdate, pos, IDs=PLANETS)
 
 def build_progress_chart(ipo_date_str, ipo_time_str, target_date_str, lat, lon, tz='+03:00'):
@@ -224,12 +311,17 @@ def score_from_aspects(aspects):
             score -= 6 * weight
     return max(0, min(100, round(score, 1)))
 
-def prepare_ai_summary(ticker, natal_d, prog_d, transit_d, natal_prog, prog_natal, transit_prog, all_aspects):
+def prepare_ai_summary(ticker, natal_d, prog_d, transit_d, solar_d, natal_prog, prog_natal, transit_prog, solar_natal, all_aspects):
     def planet_block(details):
-        lines = [f"  {'Gezegen':<10} {'Burç':<10} {'Burç Lon':<14} {'Ev':>3}  {'Kusp Burç':<12} Kusp Lon", "  " + "-" * 72]
+        lines = [f"  {'Gezegen':<10} {'Burç':<10} {'Burç Lon':<14} {'Ev':>3}  {'Kusp Burç':<12} {'Kusp Lon':<14} Hareket", "  " + "-" * 80]
+        # ASC satırı
+        asc = details.get('asc')
+        if asc:
+            lines.append(f"  {'ASC':<10} {asc['burc']:<10} {asc['burc_lon']:<14} {'':>3}  {'':12} {'':14}")
         for p in details['gezegenler']:
-            ev = str(p['ev']) if p['ev'] else '?'
-            lines.append(f"  {p['gezegen']:<10} {p['burc']:<10} {p['burc_lon']:<14} {ev:>3}  {(p['ev_kusp_burcu'] or '?'):<12} {p['ev_kusp_lon'] or '?'}")
+            ev  = str(p['ev']) if p['ev'] else '?'
+            har = p.get('hareket', '')
+            lines.append(f"  {p['gezegen']:<10} {p['burc']:<10} {p['burc_lon']:<14} {ev:>3}  {(p['ev_kusp_burcu'] or '?'):<12} {p['ev_kusp_lon'] or '?':<14} {har}")
         return lines
 
     def aspect_block(aspect_list, limit=10):
@@ -244,7 +336,29 @@ def prepare_ai_summary(ticker, natal_d, prog_d, transit_d, natal_prog, prog_nata
     olumlu  = sum(1 for a in all_aspects if a['nitelik'] == 'olumlu')
     olumsuz = sum(1 for a in all_aspects if a['nitelik'] == 'olumsuz')
 
-    sections = ["=" * 60, f"  {ticker} — Astrolojik Analiz Özeti", "=" * 60, "", "── NATAL HARİTA ─────────────────────────────────────────"] + planet_block(natal_d) + ["", "── PROGRESS HARİTA ──────────────────────────────────────"] + planet_block(prog_d) + ["", "── TRANSİT HARİTA ───────────────────────────────────────"] + planet_block(transit_d) + ["", "── NATAL → PROGRESS AÇILARI  (1° orb) ──────────────────"] + aspect_block(natal_prog) + ["", "── PROGRESS → NATAL SİNASTRİ  (1° orb) ─────────────────"] + aspect_block(prog_natal) + ["", "── TRANSİT (yavaş) → PROGRESS (hızlı) SİNASTRİ ────────"] + aspect_block(transit_prog) + ["", "── ÖZET ─────────────────────────────────────────────────", f"  Toplam aktif açı : {len(all_aspects)}", f"  Olumlu           : {olumlu}", f"  Olumsuz          : {olumsuz}"]
+    sections = (
+        ["=" * 60, f"  {ticker} — Astrolojik Analiz Özeti", "=" * 60, "",
+         "── NATAL HARİTA ─────────────────────────────────────────"]
+        + planet_block(natal_d)
+        + ["", "── PROGRESS HARİTA ──────────────────────────────────────"]
+        + planet_block(prog_d)
+        + ["", "── TRANSİT HARİTA ───────────────────────────────────────"]
+        + planet_block(transit_d)
+        + ["", "── SOLAR RETURN HARİTA ──────────────────────────────────"]
+        + (planet_block(solar_d) if solar_d else ["  Solar Return hesaplanamadı."])
+        + ["", "── NATAL → PROGRESS AÇILARI  (1° orb) ──────────────────"]
+        + aspect_block(natal_prog)
+        + ["", "── PROGRESS → NATAL SİNASTRİ  (1° orb) ─────────────────"]
+        + aspect_block(prog_natal)
+        + ["", "── TRANSİT (yavaş) → PROGRESS (hızlı) SİNASTRİ ────────"]
+        + aspect_block(transit_prog)
+        + ["", "── SOLAR RETURN → NATAL SİNASTRİ  (3° orb) ─────────────"]
+        + aspect_block(solar_natal)
+        + ["", "── ÖZET ─────────────────────────────────────────────────",
+           f"  Toplam aktif açı : {len(all_aspects)}",
+           f"  Olumlu           : {olumlu}",
+           f"  Olumsuz          : {olumsuz}"]
+    )
     return "\n".join(sections)
 
 # ─── Ana Endpoint ─────────────────────────────────────────────────────────────
@@ -265,25 +379,44 @@ def calculate():
         progress = build_progress_chart(ipo_date, ipo_time, today, lat, lon)
         transit  = build_chart(today, time_now, lat, lon)
 
+        # Solar Return: bu yılın solar return haritası
+        current_year   = dp.parse(today).year
+        solar_return   = build_solar_return_chart(ipo_date, ipo_time, current_year, lat, lon)
+
         natal_details   = extract_planet_details(natal,    'Natal')
         prog_details    = extract_planet_details(progress, 'Progress')
         transit_details = extract_planet_details(transit,  'Transit')
+        solar_details   = extract_planet_details(solar_return, 'SolarReturn') if solar_return else None
 
         natal_to_prog   = find_aspects(natal, progress, orb=1, label_a='Natal', label_b='Progress')
         prog_to_natal   = find_aspects(progress, natal, orb=1, label_a='Progress', label_b='Natal')
         transit_to_prog = find_transit_progress_aspects(transit, progress)
+        solar_to_natal  = find_aspects(solar_return, natal, orb=3, label_a='SolarReturn', label_b='Natal') if solar_return else []
 
-        all_aspects = natal_to_prog + prog_to_natal + transit_to_prog
+        all_aspects = natal_to_prog + prog_to_natal + transit_to_prog + solar_to_natal
         astro_score = score_from_aspects(all_aspects)
-        ai_summary  = prepare_ai_summary(ticker, natal_details, prog_details, transit_details, natal_to_prog, prog_to_natal, transit_to_prog, all_aspects)
+        ai_summary  = prepare_ai_summary(
+            ticker, natal_details, prog_details, transit_details, solar_details,
+            natal_to_prog, prog_to_natal, transit_to_prog, solar_to_natal, all_aspects
+        )
 
         return jsonify({
             'ticker': ticker,
             'astro_score': astro_score,
             'status': 'ok',
             'ai_summary': ai_summary,
-            'haritalar': {'natal': natal_details, 'progress': prog_details, 'transit': transit_details},
-            'acılar': {'natal_progress': natal_to_prog, 'progress_natal': prog_to_natal, 'transit_progress': transit_to_prog}
+            'haritalar': {
+                'natal':        natal_details,
+                'progress':     prog_details,
+                'transit':      transit_details,
+                'solar_return': solar_details,
+            },
+            'acılar': {
+                'natal_progress':    natal_to_prog,
+                'progress_natal':    prog_to_natal,
+                'transit_progress':  transit_to_prog,
+                'solar_natal':       solar_to_natal,
+            }
         })
     except Exception as e:
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
